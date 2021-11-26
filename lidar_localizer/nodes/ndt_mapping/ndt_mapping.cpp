@@ -70,6 +70,7 @@ struct pose
   double yaw;
 };
 
+// 计算方法类型
 enum class MethodType
 {
   PCL_GENERIC = 0,
@@ -163,6 +164,8 @@ static nav_msgs::Odometry odom;
 static std::ofstream ofs;
 static std::string filename;
 
+// param 回调函数，利用ConfigNDTMapping文件进行参数设置，设置的参数有：ndt分辨率、步长、最大迭代次数、体素叶大小、
+// 最大最小扫描范围(用来过滤距离车辆较近和较远的点云数据)
 static void param_callback(const autoware_config_msgs::ConfigNDTMapping::ConstPtr& input)
 {
   ndt_res = input->resolution;
@@ -185,6 +188,9 @@ static void param_callback(const autoware_config_msgs::ConfigNDTMapping::ConstPt
   std::cout << "min_add_scan_shift: " << min_add_scan_shift << std::endl;
 }
 
+// output 回调函数用来输出点云建图，首先从参数配置文件中获取过滤分辨率参数，然后声明点云原始地图以及过滤处理地图的指针，
+// 然后应用体素滤波对原始点云图进行过滤，如果判断滤波分辨率为0，则输出原始点云尺寸，否则进行滤波之后，
+// 将处理之后的点云图像转换为ros类型的点云消息，并通过ndt_map_pub发布该点云消息
 static void output_callback(const autoware_config_msgs::ConfigNDTMappingOutput::ConstPtr& input)
 {
   double filter_res = input->filter_res;
@@ -207,10 +213,10 @@ static void output_callback(const autoware_config_msgs::ConfigNDTMappingOutput::
   }
   else
   {
-    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
-    voxel_grid_filter.setLeafSize(filter_res, filter_res, filter_res);
-    voxel_grid_filter.setInputCloud(map_ptr);
-    voxel_grid_filter.filter(*map_filtered);
+    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter; // 声明体素滤波
+    voxel_grid_filter.setLeafSize(filter_res, filter_res, filter_res); // 设置滤波分辨率
+    voxel_grid_filter.setInputCloud(map_ptr); 
+    voxel_grid_filter.filter(*map_filtered); // 进行体素下采样，并保存结果到 map_filtered中
     std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
     std::cout << "Filtered: " << map_filtered->points.size() << " points." << std::endl;
     pcl::toROSMsg(*map_filtered, *map_msg_ptr);
@@ -219,32 +225,34 @@ static void output_callback(const autoware_config_msgs::ConfigNDTMappingOutput::
   ndt_map_pub.publish(*map_msg_ptr);
 
   // Writing Point Cloud data to PCD file
+  // 将点云数据写入到pcd文件
   if (filter_res == 0.0)
   {
-    pcl::io::savePCDFileASCII(filename, *map_ptr);
+    pcl::io::savePCDFileASCII(filename, *map_ptr);  // 如果未进行体素过滤，则将初始原地图写入pcd文件
     std::cout << "Saved " << map_ptr->points.size() << " data points to " << filename << "." << std::endl;
   }
   else
   {
-    pcl::io::savePCDFileASCII(filename, *map_filtered);
+    pcl::io::savePCDFileASCII(filename, *map_filtered); //否则将过滤后的地图写入pcd文件
     std::cout << "Saved " << map_filtered->points.size() << " data points to " << filename << "." << std::endl;
   }
 }
 
+// 利用里程计与imu联合计算当前初始位置
 static void imu_odom_calc(ros::Time current_time)
 {
   static ros::Time previous_time = current_time;
   double diff_time = (current_time - previous_time).toSec();
 
-  double diff_imu_roll = imu.angular_velocity.x * diff_time;
+  double diff_imu_roll = imu.angular_velocity.x * diff_time; 
   double diff_imu_pitch = imu.angular_velocity.y * diff_time;
   double diff_imu_yaw = imu.angular_velocity.z * diff_time;
 
-  current_pose_imu_odom.roll += diff_imu_roll;
+  current_pose_imu_odom.roll += diff_imu_roll; 
   current_pose_imu_odom.pitch += diff_imu_pitch;
   current_pose_imu_odom.yaw += diff_imu_yaw;
 
-  double diff_distance = odom.twist.twist.linear.x * diff_time;
+  double diff_distance = odom.twist.twist.linear.x * diff_time;  
   offset_imu_odom_x += diff_distance * cos(-current_pose_imu_odom.pitch) * cos(current_pose_imu_odom.yaw);
   offset_imu_odom_y += diff_distance * cos(-current_pose_imu_odom.pitch) * sin(current_pose_imu_odom.yaw);
   offset_imu_odom_z += diff_distance * sin(-current_pose_imu_odom.pitch);
@@ -253,7 +261,7 @@ static void imu_odom_calc(ros::Time current_time)
   offset_imu_odom_pitch += diff_imu_pitch;
   offset_imu_odom_yaw += diff_imu_yaw;
 
-  guess_pose_imu_odom.x = previous_pose.x + offset_imu_odom_x;
+  guess_pose_imu_odom.x = previous_pose.x + offset_imu_odom_x; 
   guess_pose_imu_odom.y = previous_pose.y + offset_imu_odom_y;
   guess_pose_imu_odom.z = previous_pose.z + offset_imu_odom_z;
   guess_pose_imu_odom.roll = previous_pose.roll + offset_imu_odom_roll;
@@ -263,20 +271,28 @@ static void imu_odom_calc(ros::Time current_time)
   previous_time = current_time;
 }
 
+// 利用ndt进行地图配准的时候，每一次都要获取初始位置，获取初始位置的方法有:
+//   1、利用初始化位置赋予初值；
+//   2、利用gps进行位置的更新来获取初值
+//   3、利用imu惯性导航数据处理来获取初值；
+//   4、利用odm里程计来获取初值；以及利用imu与odm组合数据获取初值。
+// 利用里程计来计算ndt配准时的初始值，首先获取两帧的时间差，利用微小时间内角速度线速度变化微小原理来计算微小时间间隔内的里程计角度变化量，
+// 利用前一帧位置旋转加上变化角度，更新当前odm位置的角度。然后计算odom的偏差距离和偏差角度，最后对初始位置进行修正=前一帧位置+偏差位置，
+// 得到利用odom计算的初始位置
 static void odom_calc(ros::Time current_time)
 {
   static ros::Time previous_time = current_time;
-  double diff_time = (current_time - previous_time).toSec();
+  double diff_time = (current_time - previous_time).toSec();  //获取前后两帧时间差
 
-  double diff_odom_roll = odom.twist.twist.angular.x * diff_time;
+  double diff_odom_roll = odom.twist.twist.angular.x * diff_time; //计算两帧时间间隔内的里程计旋转角度
   double diff_odom_pitch = odom.twist.twist.angular.y * diff_time;
   double diff_odom_yaw = odom.twist.twist.angular.z * diff_time;
 
-  current_pose_odom.roll += diff_odom_roll;
+  current_pose_odom.roll += diff_odom_roll; //更新当前odm位置的角度，前一帧位置旋转加上变化角度
   current_pose_odom.pitch += diff_odom_pitch;
   current_pose_odom.yaw += diff_odom_yaw;
 
-  double diff_distance = odom.twist.twist.linear.x * diff_time;
+  double diff_distance = odom.twist.twist.linear.x * diff_time; //在x方向的变化距离，然后计算由于车身不稳定造成的计算偏差，具体计算原理不太明白
   offset_odom_x += diff_distance * cos(-current_pose_odom.pitch) * cos(current_pose_odom.yaw);
   offset_odom_y += diff_distance * cos(-current_pose_odom.pitch) * sin(current_pose_odom.yaw);
   offset_odom_z += diff_distance * sin(-current_pose_odom.pitch);
@@ -285,7 +301,7 @@ static void odom_calc(ros::Time current_time)
   offset_odom_pitch += diff_odom_pitch;
   offset_odom_yaw += diff_odom_yaw;
 
-  guess_pose_odom.x = previous_pose.x + offset_odom_x;
+  guess_pose_odom.x = previous_pose.x + offset_odom_x; //对初始位置进行修正=前一帧位置+偏差位置
   guess_pose_odom.y = previous_pose.y + offset_odom_y;
   guess_pose_odom.z = previous_pose.z + offset_odom_z;
   guess_pose_odom.roll = previous_pose.roll + offset_odom_roll;
@@ -295,6 +311,7 @@ static void odom_calc(ros::Time current_time)
   previous_time = current_time;
 }
 
+// 利用imu来计算初始位置
 static void imu_calc(ros::Time current_time)
 {
   static ros::Time previous_time = current_time;
@@ -403,6 +420,9 @@ static void imuUpsideDown(const sensor_msgs::Imu::Ptr input)
   input->orientation = tf::createQuaternionMsgFromRollPitchYaw(input_roll, input_pitch, input_yaw);
 }
 
+// imu回调函数主要是在接收到imu消息之后进行处理，首先获取此时imu的时间，然后计算前后两次消息的时间偏差，
+// 接着通过imu消息来获取此时的imu的rpy角度，并将角度化为弧度，保持180度内，获取imu在x方向上的线性加速度，
+// 然后计算imu的瞬时角速度，当diff_time=0时，将角速度归零。利用imu计算位置初值，更新前一帧时间。
 static void imu_callback(const sensor_msgs::Imu::Ptr& input)
 {
   // std::cout << __func__ << std::endl;
@@ -410,16 +430,16 @@ static void imu_callback(const sensor_msgs::Imu::Ptr& input)
   if (_imu_upside_down)
     imuUpsideDown(input);
 
-  const ros::Time current_time = input->header.stamp;
+  const ros::Time current_time = input->header.stamp; //获取imu此时的时间
   static ros::Time previous_time = current_time;
-  const double diff_time = (current_time - previous_time).toSec();
+  const double diff_time = (current_time - previous_time).toSec(); //计算前后两次消息的时间偏差
 
   double imu_roll, imu_pitch, imu_yaw;
   tf::Quaternion imu_orientation;
-  tf::quaternionMsgToTF(input->orientation, imu_orientation);
-  tf::Matrix3x3(imu_orientation).getRPY(imu_roll, imu_pitch, imu_yaw);
+  tf::quaternionMsgToTF(input->orientation, imu_orientation); //imu四元数消息转化为四元数存入imu_orientation
+  tf::Matrix3x3(imu_orientation).getRPY(imu_roll, imu_pitch, imu_yaw); //获取imu此时的rpy旋转角度
 
-  imu_roll = wrapToPmPi(imu_roll);
+  imu_roll = wrapToPmPi(imu_roll); //将角度化为弧度
   imu_pitch = wrapToPmPi(imu_pitch);
   imu_yaw = wrapToPmPi(imu_yaw);
 
@@ -429,7 +449,7 @@ static void imu_callback(const sensor_msgs::Imu::Ptr& input)
   const double diff_imu_yaw = calcDiffForRadian(imu_yaw, previous_imu_yaw);
 
   imu.header = input->header;
-  imu.linear_acceleration.x = input->linear_acceleration.x;
+  imu.linear_acceleration.x = input->linear_acceleration.x; //获取imu在x方向上的线性加速度
   // imu.linear_acceleration.y = input->linear_acceleration.y;
   // imu.linear_acceleration.z = input->linear_acceleration.z;
   imu.linear_acceleration.y = 0;
@@ -448,17 +468,21 @@ static void imu_callback(const sensor_msgs::Imu::Ptr& input)
     imu.angular_velocity.z = 0;
   }
 
-  imu_calc(input->header.stamp);
+  imu_calc(input->header.stamp); //利用imu计算位置初值
 
-  previous_time = current_time;
+  previous_time = current_time; //更新前一帧时间
   previous_imu_roll = imu_roll;
   previous_imu_pitch = imu_pitch;
   previous_imu_yaw = imu_yaw;
 }
 
+// 然后是具体接收到点云数据之后的points_callback回调函数，当接受到点云消息之后会进入到回调函数来处理点云数据
+// 首先声明两个点云对象tmp与scan，并且实例化点云指针filtered_scan_ptr，transformed_scan_ptr分别用来表示过滤点云与转换点云。
+// 然后获取当前点云扫描时间，并且将当前点云pcl消息类型转化为ros类型，并存入tmp，然后对点云中每一个激光点的数据进行处理，
+// 去除不符合距离范围内的点云数据。主要过滤掉离车辆过近与过远的点
 static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 {
-  double r;
+  double r; //点云到车的距离
   pcl::PointXYZI p;
   pcl::PointCloud<pcl::PointXYZI> tmp, scan;
   pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_scan_ptr(new pcl::PointCloud<pcl::PointXYZI>());
@@ -470,10 +494,11 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
   static tf::TransformBroadcaster br;
   tf::Transform transform;
 
-  current_scan_time = input->header.stamp;
+  current_scan_time = input->header.stamp; //获取当前点云扫描时间
 
-  pcl::fromROSMsg(*input, tmp);
+  pcl::fromROSMsg(*input, tmp); //将当前点云pcl消息类型转化为ros类型，并存入tmp
 
+  // //将tmp点云容器内的点进行逐一处理，去除不符合距离范围内的点云数据
   for (pcl::PointCloud<pcl::PointXYZI>::const_iterator item = tmp.begin(); item != tmp.end(); item++)
   {
     p.x = (double)item->x;
@@ -481,24 +506,27 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     p.z = (double)item->z;
     p.intensity = (double)item->intensity;
 
-    r = sqrt(pow(p.x, 2.0) + pow(p.y, 2.0));
+    r = sqrt(pow(p.x, 2.0) + pow(p.y, 2.0)); //计算点与激光雷达的距离r，若小于最小距离或大于最大距离则滤除该点
     if (min_scan_range < r && r < max_scan_range)
     {
       scan.push_back(p);
     }
   }
 
+  // 然后将初始化点云加入至地图，若点云地图没有初始化载入，则将第一帧图像作为初始图像，然后将配准之后的图像逐帧加入map。
+  // 通过tf_btol变换矩阵将原始点云进行转化。tf_btol是车辆在起始位置是不在全局地图原点时的变换矩阵。
+  // 然后对原始输入点云进行体素过滤，选择不同的方法进行参数设置
   pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr(new pcl::PointCloud<pcl::PointXYZI>(scan));
 
   // Add initial point cloud to velodyne_map
-  if (initial_scan_loaded == 0)
+  if (initial_scan_loaded == 0) //若点云地图没有初始化载入，则
   {
     pcl::transformPointCloud(*scan_ptr, *transformed_scan_ptr, tf_btol);
     map += *transformed_scan_ptr;
     initial_scan_loaded = 1;
   }
 
-  // Apply voxelgrid filter
+  // Apply voxelgrid filter 对原始输入点云进行体素过滤
   pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
   voxel_grid_filter.setLeafSize(voxel_leaf_size, voxel_leaf_size, voxel_leaf_size);
   voxel_grid_filter.setInputCloud(scan_ptr);
@@ -506,7 +534,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr map_ptr(new pcl::PointCloud<pcl::PointXYZI>(map));
 
-  if (_method_type == MethodType::PCL_GENERIC)
+  if (_method_type == MethodType::PCL_GENERIC) //进行ndt参数设置
   {
     ndt.setTransformationEpsilon(trans_eps);
     ndt.setStepSize(step_size);
@@ -561,14 +589,16 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     is_first_map = false;
   }
 
-  guess_pose.x = previous_pose.x + diff_x;
+  // guess_pose是ndt配准时候的初始位置，该位置一般由前一帧位置加上微小时间段内的变化，
+  // 当采用imu或odom时可以利用其进行辅助精确定位初始位置。如果未使用imu以及odom则使用原来的guess_pose
+  guess_pose.x = previous_pose.x + diff_x; //初始位置=前一帧位置+位置的变化
   guess_pose.y = previous_pose.y + diff_y;
   guess_pose.z = previous_pose.z + diff_z;
   guess_pose.roll = previous_pose.roll;
   guess_pose.pitch = previous_pose.pitch;
   guess_pose.yaw = previous_pose.yaw + diff_yaw;
 
-  if (_use_imu == true && _use_odom == true)
+  if (_use_imu == true && _use_odom == true) //选择使用初值计算方法
     imu_odom_calc(current_scan_time);
   if (_use_imu == true && _use_odom == false)
     imu_calc(current_scan_time);
@@ -601,10 +631,11 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZI>);
 
+  // 利用不同的方法，来进行ndt配准
   if (_method_type == MethodType::PCL_GENERIC)
   {
-    ndt.align(*output_cloud, init_guess);
-    fitness_score = ndt.getFitnessScore();
+    ndt.align(*output_cloud, init_guess); //开始ndt配准
+    fitness_score = ndt.getFitnessScore(); //计算适应分数
     t_localizer = ndt.getFinalTransformation();
     has_converged = ndt.hasConverged();
     final_num_iteration = ndt.getFinalNumIteration();
@@ -669,6 +700,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
   ndt_pose.z = t_base_link(2, 3);
   mat_b.getRPY(ndt_pose.roll, ndt_pose.pitch, ndt_pose.yaw, 1);
 
+  // 将ndt配准的位置作为当前位置，并且以当前位置设置坐标系，并发布坐标变换信息
   current_pose.x = ndt_pose.x;
   current_pose.y = ndt_pose.y;
   current_pose.z = ndt_pose.z;
@@ -676,9 +708,9 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
   current_pose.pitch = ndt_pose.pitch;
   current_pose.yaw = ndt_pose.yaw;
 
-  transform.setOrigin(tf::Vector3(current_pose.x, current_pose.y, current_pose.z));
-  q.setRPY(current_pose.roll, current_pose.pitch, current_pose.yaw);
-  transform.setRotation(q);
+  transform.setOrigin(tf::Vector3(current_pose.x, current_pose.y, current_pose.z)); //以当前位置作为坐标原点
+  q.setRPY(current_pose.roll, current_pose.pitch, current_pose.yaw); // 根据当前位置旋转角度rpy，设置旋转四元数q
+  transform.setRotation(q); //利用q来设置旋转
 
   br.sendTransform(tf::StampedTransform(transform, current_scan_time, "map", "base_link"));
 
@@ -832,7 +864,11 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
   std::cout << "-----------------------------------------------------------------" << std::endl;
   std::cout << "Sequence number: " << input->header.seq << std::endl;
-  std::cout << "Number of scan points: " << scan_ptr->size() << " points." << std::endl;
+  std::cout << "Number of scan points: " << 
+    // 然后将初始化点云加入至地图，若点云地图没有初始化载入，则将第一帧图像作为初始图像，然后将配准之后的图像逐帧加入map。通过tf_btol变换矩阵将原始点云进行转化。tf_btol是车辆在起始位置是不在全局地图原点时的变换矩阵。然后对原始输入点云进行体素过滤，选择不同的方法进行参数设置
+————————————————
+版权声明：本文为CSDN博主「JZJHfc」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/JZJHfc/article/details/105318182->size() << " points." << std::endl;
   std::cout << "Number of filtered scan points: " << filtered_scan_ptr->size() << " points." << std::endl;
   std::cout << "transformed_scan_ptr: " << transformed_scan_ptr->points.size() << " points." << std::endl;
   std::cout << "map: " << map.points.size() << " points." << std::endl;
@@ -850,13 +886,15 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
 int main(int argc, char** argv)
 {
+  // 前一帧点云图车辆的位置
   previous_pose.x = 0.0;
   previous_pose.y = 0.0;
   previous_pose.z = 0.0;
   previous_pose.roll = 0.0;
   previous_pose.pitch = 0.0;
   previous_pose.yaw = 0.0;
-
+  
+  // 当前帧点云图车辆的位置
   ndt_pose.x = 0.0;
   ndt_pose.y = 0.0;
   ndt_pose.z = 0.0;
@@ -864,6 +902,7 @@ int main(int argc, char** argv)
   ndt_pose.pitch = 0.0;
   ndt_pose.yaw = 0.0;
 
+  // 表示使用ndt匹配算法
   current_pose.x = 0.0;
   current_pose.y = 0.0;
   current_pose.z = 0.0;
@@ -877,7 +916,8 @@ int main(int argc, char** argv)
   current_pose_imu.roll = 0.0;
   current_pose_imu.pitch = 0.0;
   current_pose_imu.yaw = 0.0;
-
+  
+  // 表示提供的初始位置
   guess_pose.x = 0.0;
   guess_pose.y = 0.0;
   guess_pose.z = 0.0;
@@ -892,11 +932,13 @@ int main(int argc, char** argv)
   added_pose.pitch = 0.0;
   added_pose.yaw = 0.0;
 
+  // 表示前后两帧的位置与角度变化
   diff_x = 0.0;
   diff_y = 0.0;
   diff_z = 0.0;
   diff_yaw = 0.0;
 
+  // 表示位置与角度的偏差矫正
   offset_imu_x = 0.0;
   offset_imu_y = 0.0;
   offset_imu_z = 0.0;
@@ -1070,7 +1112,8 @@ int main(int argc, char** argv)
 #endif
 
   map.header.frame_id = "map";
-
+  
+  // 通过/ndt_map话题将点云建图发布出来，以及通过回调函数订阅建图，里程计以及imu信息。
   ndt_map_pub = nh.advertise<sensor_msgs::PointCloud2>("/ndt_map", 1000);
   current_pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/current_pose", 1000);
 
