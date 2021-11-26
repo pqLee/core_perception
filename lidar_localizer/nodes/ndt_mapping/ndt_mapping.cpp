@@ -864,11 +864,6 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
   std::cout << "-----------------------------------------------------------------" << std::endl;
   std::cout << "Sequence number: " << input->header.seq << std::endl;
-  std::cout << "Number of scan points: " << 
-    // 然后将初始化点云加入至地图，若点云地图没有初始化载入，则将第一帧图像作为初始图像，然后将配准之后的图像逐帧加入map。通过tf_btol变换矩阵将原始点云进行转化。tf_btol是车辆在起始位置是不在全局地图原点时的变换矩阵。然后对原始输入点云进行体素过滤，选择不同的方法进行参数设置
-————————————————
-版权声明：本文为CSDN博主「JZJHfc」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
-原文链接：https://blog.csdn.net/JZJHfc/article/details/105318182->size() << " points." << std::endl;
   std::cout << "Number of filtered scan points: " << filtered_scan_ptr->size() << " points." << std::endl;
   std::cout << "transformed_scan_ptr: " << transformed_scan_ptr->points.size() << " points." << std::endl;
   std::cout << "map: " << map.points.size() << " points." << std::endl;
